@@ -3,6 +3,7 @@ package com.juul.kable
 import android.Manifest
 import android.os.Build
 import androidx.annotation.RequiresPermission
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
 @Deprecated(
@@ -14,6 +15,8 @@ public typealias Priority = AndroidPeripheral.Priority
 public interface AndroidPeripheral : Peripheral {
 
     public enum class Priority { Low, Balanced, High }
+
+    public enum class Bond { None, Bonding, Bonded }
 
     public enum class Type {
 
@@ -75,10 +78,15 @@ public interface AndroidPeripheral : Peripheral {
      */
     public suspend fun requestMtu(mtu: Int): Int
 
+
     /**
      * [StateFlow] of the most recently negotiated MTU. The MTU will change upon a successful request to change the MTU
      * (via [requestMtu]), or if the peripheral initiates an MTU change. [StateFlow]'s `value` will be `null` until MTU
      * is negotiated.
      */
     public val mtu: StateFlow<Int?>
+
+
+    public val bondState: Flow<Bond>
+
 }

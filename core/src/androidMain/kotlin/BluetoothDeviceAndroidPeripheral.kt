@@ -3,10 +3,17 @@ package com.juul.kable
 import android.bluetooth.BluetoothAdapter.STATE_OFF
 import android.bluetooth.BluetoothAdapter.STATE_ON
 import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothDevice.ACTION_BOND_STATE_CHANGED
+import android.bluetooth.BluetoothDevice.BOND_BONDED
+import android.bluetooth.BluetoothDevice.BOND_BONDING
+import android.bluetooth.BluetoothDevice.BOND_NONE
 import android.bluetooth.BluetoothDevice.DEVICE_TYPE_CLASSIC
 import android.bluetooth.BluetoothDevice.DEVICE_TYPE_DUAL
 import android.bluetooth.BluetoothDevice.DEVICE_TYPE_LE
 import android.bluetooth.BluetoothDevice.DEVICE_TYPE_UNKNOWN
+import android.bluetooth.BluetoothDevice.ERROR
+import android.bluetooth.BluetoothDevice.EXTRA_BOND_STATE
+import android.bluetooth.BluetoothDevice.EXTRA_DEVICE
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic.PROPERTY_INDICATE
 import android.bluetooth.BluetoothGattCharacteristic.PROPERTY_NOTIFY
@@ -15,7 +22,13 @@ import android.bluetooth.BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
 import android.bluetooth.BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
 import android.bluetooth.BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
 import android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+import android.content.IntentFilter
+import androidx.core.content.IntentCompat
 import com.benasher44.uuid.uuidFrom
+import com.juul.kable.AndroidPeripheral.Bond
+import com.juul.kable.AndroidPeripheral.Bond.Bonded
+import com.juul.kable.AndroidPeripheral.Bond.Bonding
+import com.juul.kable.AndroidPeripheral.Bond.None
 import com.juul.kable.AndroidPeripheral.Type
 import com.juul.kable.WriteType.WithResponse
 import com.juul.kable.WriteType.WithoutResponse
@@ -40,9 +53,17 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapConcat
+import kotlinx.coroutines.flow.flatMapMerge
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
@@ -64,7 +85,8 @@ internal class BluetoothDeviceAndroidPeripheral(
     private val logging: Logging,
 ) : AndroidPeripheral {
 
-    private val logger = Logger(logging, tag = "Kable/Peripheral", identifier = bluetoothDevice.address)
+    private val logger =
+        Logger(logging, tag = "Kable/Peripheral", identifier = bluetoothDevice.address)
 
     private val _state = MutableStateFlow<State>(State.Disconnected())
     override val state: StateFlow<State> = _state.asStateFlow()
@@ -91,7 +113,49 @@ internal class BluetoothDeviceAndroidPeripheral(
     private val _mtu = MutableStateFlow<Int?>(null)
     override val mtu: StateFlow<Int?> = _mtu.asStateFlow()
 
-    private val observers = Observers<ByteArray>(this, logging, exceptionHandler = observationExceptionHandler)
+/*
+    //This is a hack to get the bond state from the device itself
+    val _bondState:MutableStateFlow<Bond> by lazy {
+        MutableStateFlow<Bond>(getBondState(bluetoothDevice.bondState))
+    }
+
+    fun getBondState(state:Int):Bond = when (state) {
+            BOND_NONE -> None
+            BOND_BONDING -> Bonding
+            BOND_BONDED -> Bonded
+            else -> error("Unsupported bond state: $state")
+        }
+*/
+
+
+    // First we get the state from the device itself, then we listen for changes.
+    override val bondState: Flow<Bond> by lazy {
+        merge(
+            flowOf(bluetoothDevice.bondState),
+            broadcastReceiverFlow(IntentFilter(ACTION_BOND_STATE_CHANGED))
+                .filter { intent ->
+                    bluetoothDevice == IntentCompat.getParcelableExtra(
+                        intent,
+                        EXTRA_DEVICE,
+                        BluetoothDevice::class.java,
+                    )
+                }.map { intent ->
+                    intent.getIntExtra(EXTRA_BOND_STATE, ERROR)
+                }
+        ).map { state ->
+            when (state) {
+                BOND_NONE -> None
+                BOND_BONDING -> Bonding
+                BOND_BONDED -> Bonded
+                else -> error("Unsupported bond state: $state")
+            }
+        }.onEach {
+            logger.info { message = "Bond state $it" }
+        }
+    }
+
+    private val observers =
+        Observers<ByteArray>(this, logging, exceptionHandler = observationExceptionHandler)
 
     @Volatile
     private var _discoveredServices: List<DiscoveredService>? = null
@@ -131,6 +195,13 @@ internal class BluetoothDeviceAndroidPeripheral(
     private fun connectAsync() = scope.async(start = LAZY) {
         try {
             _connection = establishConnection()
+
+           /*     .also {
+                    logger.debug { message = "Awaiting bond state" }
+                    val bond = bondState.first { it != Bonding }
+                    logger.debug { message = "Bond state: $bond" }
+                }*/
+
             suspendUntilOrThrow<State.Connecting.Services>()
             discoverServices()
             onServicesDiscovered(ServicesDiscoveredPeripheral(this@BluetoothDeviceAndroidPeripheral))
@@ -201,7 +272,10 @@ internal class BluetoothDeviceAndroidPeripheral(
             }
 
             if (services.isEmpty()) {
-                logger.warn { message = "Empty services (attempt ${attempt + 1} of $DISCOVER_SERVICES_RETRIES)" }
+                logger.warn {
+                    message =
+                        "Empty services (attempt ${attempt + 1} of $DISCOVER_SERVICES_RETRIES)"
+                }
             } else {
                 logger.verbose { message = "Discovered ${services.count()} services" }
                 _discoveredServices = services
@@ -232,11 +306,31 @@ internal class BluetoothDeviceAndroidPeripheral(
         }
 
         val platformCharacteristic = discoveredServices.obtain(characteristic, writeType.properties)
-        connection.execute<OnCharacteristicWrite> {
-            platformCharacteristic.value = data
-            platformCharacteristic.writeType = writeType.intValue
-            writeCharacteristic(platformCharacteristic)
+
+        val writeFunction = suspend {
+            connection.execute<OnCharacteristicWrite> {
+                platformCharacteristic.value = data
+                platformCharacteristic.writeType = writeType.intValue
+                writeCharacteristic(platformCharacteristic)
+            }
         }
+        try {
+            writeFunction()
+        } catch (_: BondRequiredException) {
+            awaitBond()
+            logger.debug {
+                message = "Retrying write"
+                detail(characteristic)
+                detail(writeType)
+                detail(data)
+            }
+            writeFunction()
+        }
+    }
+
+    private suspend fun awaitBond() {
+        logger.warn { message = "Insufficient authentication, awaiting bond" }
+        bondState.first { it == Bonded }
     }
 
     override suspend fun read(
@@ -248,8 +342,20 @@ internal class BluetoothDeviceAndroidPeripheral(
         }
 
         val platformCharacteristic = discoveredServices.obtain(characteristic, Read)
-        return connection.execute<OnCharacteristicRead> {
-            readCharacteristic(platformCharacteristic)
+
+        return try {
+            connection.execute<OnCharacteristicRead> {
+                readCharacteristic(platformCharacteristic)
+            }
+        } catch (_: BondRequiredException) {
+            awaitBond()
+            logger.debug {
+                message = "Retrying read"
+                detail(characteristic)
+            }
+            connection.execute<OnCharacteristicRead> {
+                readCharacteristic(platformCharacteristic)
+            }
         }.value!!
     }
 
@@ -338,6 +444,7 @@ internal class BluetoothDeviceAndroidPeripheral(
                         }
                         write(configDescriptor, ENABLE_NOTIFICATION_VALUE)
                     }
+
                     characteristic.supportsIndicate -> {
                         logger.verbose {
                             message = "Writing ENABLE_INDICATION_VALUE to CCCD"
@@ -345,6 +452,7 @@ internal class BluetoothDeviceAndroidPeripheral(
                         }
                         write(configDescriptor, ENABLE_INDICATION_VALUE)
                     }
+
                     else -> logger.warn {
                         message = "Characteristic supports neither notification nor indication"
                         detail(characteristic)
@@ -389,7 +497,7 @@ private fun BluetoothGatt.setCharacteristicNotificationOrThrow(
     enable: Boolean,
 ) {
     setCharacteristicNotification(characteristic, enable) ||
-        throw GattRequestRejectedException()
+            throw GattRequestRejectedException()
 }
 
 private val PlatformCharacteristic.configDescriptor: PlatformDescriptor?
