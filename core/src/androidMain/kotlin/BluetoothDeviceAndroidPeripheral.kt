@@ -110,7 +110,7 @@ internal class BluetoothDeviceAndroidPeripheral(
     private val _mtu = MutableStateFlow<Int?>(null)
     override val mtu: StateFlow<Int?> = _mtu.asStateFlow()
 
-    // First we get the state from the device itself, then we listen for changes.
+    //bon First we get the state from the device itself, then we listen for changes.
     override val bondState: Flow<Bond> by lazy {
         merge(
             flowOf(bluetoothDevice.bondState),
@@ -133,6 +133,8 @@ internal class BluetoothDeviceAndroidPeripheral(
                 BOND_BONDED -> Bonded
                 else -> error("Unsupported bond state: $state")
             }
+        }.onEach {
+            logger.info { message = "Bond state changed: $it" }
         }
     }
 
