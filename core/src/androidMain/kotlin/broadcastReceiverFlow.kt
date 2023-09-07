@@ -12,12 +12,13 @@ import kotlinx.coroutines.flow.callbackFlow
 
 public fun broadcastReceiverFlow(
     intentFilter: IntentFilter,
+    flags:Int = RECEIVER_NOT_EXPORTED
 ): Flow<Intent> = callbackFlow {
     val broadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent != null) trySend(intent)
         }
     }
-    ContextCompat.registerReceiver(applicationContext, broadcastReceiver, intentFilter, RECEIVER_NOT_EXPORTED)
+    ContextCompat.registerReceiver(applicationContext, broadcastReceiver, intentFilter, flags)
     awaitClose { applicationContext.unregisterReceiver(broadcastReceiver) }
 }
