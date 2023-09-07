@@ -23,6 +23,7 @@ import android.bluetooth.BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
 import android.bluetooth.BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
 import android.bluetooth.BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
 import android.content.IntentFilter
+import androidx.core.content.ContextCompat.RECEIVER_EXPORTED
 import androidx.core.content.IntentCompat
 import com.benasher44.uuid.uuidFrom
 import com.juul.kable.AndroidPeripheral.Bond
@@ -53,13 +54,9 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flatMapConcat
-import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
@@ -113,27 +110,28 @@ internal class BluetoothDeviceAndroidPeripheral(
     private val _mtu = MutableStateFlow<Int?>(null)
     override val mtu: StateFlow<Int?> = _mtu.asStateFlow()
 
-/*
-    //This is a hack to get the bond state from the device itself
-    val _bondState:MutableStateFlow<Bond> by lazy {
-        MutableStateFlow<Bond>(getBondState(bluetoothDevice.bondState))
-    }
-
-    fun getBondState(state:Int):Bond = when (state) {
-            BOND_NONE -> None
-            BOND_BONDING -> Bonding
-            BOND_BONDED -> Bonded
-            else -> error("Unsupported bond state: $state")
+    /*
+        //This is a hack to get the bond state from the device itself
+        val _bondState:MutableStateFlow<Bond> by lazy {
+            MutableStateFlow<Bond>(getBondState(bluetoothDevice.bondState))
         }
-*/
+
+        fun getBondState(state:Int):Bond = when (state) {
+                BOND_NONE -> None
+                BOND_BONDING -> Bonding
+                BOND_BONDED -> Bonded
+                else -> error("Unsupported bond state: $state")
+            }
+    */
 
 
     // First we get the state from the device itself, then we listen for changes.
     override val bondState: Flow<Bond> by lazy {
         merge(
             flowOf(bluetoothDevice.bondState),
-            broadcastReceiverFlow(IntentFilter(ACTION_BOND_STATE_CHANGED))
-                .filter { intent ->
+            broadcastReceiverFlow(
+                IntentFilter(ACTION_BOND_STATE_CHANGED)
+            ).filter { intent ->
                     bluetoothDevice == IntentCompat.getParcelableExtra(
                         intent,
                         EXTRA_DEVICE,
@@ -141,7 +139,7 @@ internal class BluetoothDeviceAndroidPeripheral(
                     )
                 }.map { intent ->
                     intent.getIntExtra(EXTRA_BOND_STATE, ERROR)
-                }
+                },
         ).map { state ->
             when (state) {
                 BOND_NONE -> None
@@ -195,12 +193,12 @@ internal class BluetoothDeviceAndroidPeripheral(
     private fun connectAsync() = scope.async(start = LAZY) {
         try {
             _connection = establishConnection()
-
-           /*     .also {
-                    logger.debug { message = "Awaiting bond state" }
-                    val bond = bondState.first { it != Bonding }
-                    logger.debug { message = "Bond state: $bond" }
-                }*/
+            bluetoothDevice.bondState
+            /*     .also {
+                     logger.debug { message = "Awaiting bond state" }
+                     val bond = bondState.first { it != Bonding }
+                     logger.debug { message = "Bond state: $bond" }
+                 }*/
 
             suspendUntilOrThrow<State.Connecting.Services>()
             discoverServices()
@@ -328,10 +326,6 @@ internal class BluetoothDeviceAndroidPeripheral(
         }
     }
 
-    private suspend fun awaitBond() {
-        logger.warn { message = "Insufficient authentication, awaiting bond" }
-        bondState.first { it == Bonded }
-    }
 
     override suspend fun read(
         characteristic: Characteristic,
@@ -474,6 +468,12 @@ internal class BluetoothDeviceAndroidPeripheral(
             }
         }
     }
+
+    override suspend fun awaitBond() {
+        logger.warn { message = "Insufficient authentication, awaiting bond" }
+        bondState.first { it == Bonded }
+    }
+
 
     override fun toString(): String = "Peripheral(bluetoothDevice=$bluetoothDevice)"
 }

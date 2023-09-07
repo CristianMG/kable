@@ -89,4 +89,5 @@ public interface AndroidPeripheral : Peripheral {
 
     public val bondState: Flow<Bond>
 
+    public suspend fun awaitBond()
 }
